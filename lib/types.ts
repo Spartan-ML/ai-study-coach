@@ -1,3 +1,5 @@
+import { Language } from "./i18n";
+
 export interface StudySession {
   day: number;
   topic: string;
@@ -32,4 +34,19 @@ export interface GenerateRequest {
   notes: string;
   type: GenerateType;
   examDate?: string;
+  apiKey?: string;
+  language?: Language;
+}
+
+export interface SavedSession {
+  id: string;
+  user_id: string;
+  title: string;
+  notes_preview: string;
+  exam_date: string;
+  plan: StudyPlan | null;
+  flashcards: Flashcard[] | null;
+  quiz: QuizQuestion[] | null;
+  language: Language;
+  created_at: string;
 }
