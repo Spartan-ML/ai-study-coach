@@ -2,14 +2,11 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import {
-  StudyPlan as StudyPlanType,
-  Flashcard,
-  QuizQuestion,
-} from "@/lib/types";
+import { StudyPlan as StudyPlanType, Flashcard, QuizQuestion } from "@/lib/types";
 import { useAuth } from "@/contexts/AuthContext";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { supabase } from "@/lib/supabase";
+import { generateWithGemini } from "@/lib/gemini-client";
 import StudyPlan from "@/components/StudyPlan";
 import Flashcards from "@/components/Flashcards";
 import Quiz from "@/components/Quiz";
@@ -51,12 +48,42 @@ function ErrorCard({ message, onRetry }: { message: string; onRetry: () => void 
   );
 }
 
+// Shown when no API key is found
+function NoApiKeyBanner({ onDismiss }: { onDismiss: () => void }) {
+  const router = useRouter();
+  return (
+    <div className="bg-amber-900/20 border border-amber-600/30 rounded-2xl p-5 mb-6 fade-up">
+      <p className="text-amber-300 font-body text-sm font-medium mb-1">API key required</p>
+      <p className="text-amber-200/70 font-body text-xs leading-relaxed mb-3">
+        No Gemini API key found. Go back to the home page, open{" "}
+        <span className="text-amber-300">⚙ Advanced Settings</span>, and paste your free API key from{" "}
+        <span className="text-amber-300">aistudio.google.com</span>.
+      </p>
+      <div className="flex gap-2">
+        <button
+          onClick={() => router.push("/")}
+          className="bg-amber-600 hover:bg-amber-500 text-white font-body text-xs font-semibold px-3 py-1.5 rounded-lg transition-all"
+        >
+          ← Back to home
+        </button>
+        <button
+          onClick={onDismiss}
+          className="text-amber-300/60 hover:text-amber-300 font-body text-xs px-3 py-1.5 rounded-lg transition-all border border-amber-600/20"
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const { user } = useAuth();
   const { t, language, isRTL } = useLanguage();
   const [activeTab, setActiveTab] = useState<Tab>("plan");
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const [showNoKeyBanner, setShowNoKeyBanner] = useState(false);
 
   const [planState, setPlanState] = useState<TabState<StudyPlanType>>({ status: "idle", data: null, error: "" });
   const [flashcardsState, setFlashcardsState] = useState<TabState<Flashcard[]>>({ status: "idle", data: null, error: "" });
@@ -67,32 +94,31 @@ export default function DashboardPage() {
     const setState = setters[type] as React.Dispatch<React.SetStateAction<TabState<unknown>>>;
     setState({ status: "loading", data: null, error: "" });
 
-    const apiKey = localStorage.getItem("gemini-api-key") || undefined;
+    // Get API key from localStorage (set in Advanced Settings on homepage)
+    const apiKey = localStorage.getItem("gemini-api-key")?.trim();
+
+    if (!apiKey) {
+      setShowNoKeyBanner(true);
+      setState({ status: "error", data: null, error: "No API key. Go back and add your Gemini API key in Advanced Settings." });
+      return;
+    }
 
     try {
-      const res = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ notes, type, examDate, apiKey, language }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setState({ status: "error", data: null, error: data.error || "Generation failed." });
-        return;
-      }
+      // Call Gemini directly from the browser — avoids server-side network blocks
+      const data = await generateWithGemini({ notes, type, examDate, language }, apiKey);
       setState({ status: "done", data, error: "" });
-    } catch {
-      setState({ status: "error", data: null, error: "Network error. Please check your connection." });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Generation failed.";
+      setState({ status: "error", data: null, error: msg });
     }
   }, [language]);
 
   useEffect(() => {
     const notes = sessionStorage.getItem("study-notes");
     const examDate = sessionStorage.getItem("exam-date") || "";
-
     if (!notes) { router.replace("/"); return; }
 
-    // Check if restoring a saved session
+    // Restore saved session if available
     const savedPlan = sessionStorage.getItem("saved-plan");
     const savedFlashcards = sessionStorage.getItem("saved-flashcards");
     const savedQuiz = sessionStorage.getItem("saved-quiz");
@@ -107,7 +133,7 @@ export default function DashboardPage() {
       return;
     }
 
-    // Fresh generation
+    // Fresh generation — all three in parallel
     generateContent("plan", notes, examDate);
     generateContent("flashcards", notes, examDate);
     generateContent("quiz", notes, examDate);
@@ -123,11 +149,9 @@ export default function DashboardPage() {
   const handleSave = async () => {
     if (!supabase || !user) return;
     if (planState.status !== "done" || flashcardsState.status !== "done" || quizState.status !== "done") return;
-
     setSaveStatus("saving");
     const notes = sessionStorage.getItem("study-notes") || "";
     const examDate = sessionStorage.getItem("exam-date") || "";
-
     await supabase.from("study_sessions").insert({
       user_id: user.id,
       title: notes.slice(0, 120).trim(),
@@ -138,14 +162,10 @@ export default function DashboardPage() {
       quiz: quizState.data,
       language,
     });
-
     setSaveStatus("saved");
   };
 
-  const allDone =
-    planState.status === "done" &&
-    flashcardsState.status === "done" &&
-    quizState.status === "done";
+  const allDone = planState.status === "done" && flashcardsState.status === "done" && quizState.status === "done";
 
   const TAB_LABELS: { id: Tab; label: string; emoji: string }[] = [
     { id: "plan", label: t("studyPlan"), emoji: "📅" },
@@ -159,7 +179,7 @@ export default function DashboardPage() {
     <main className="min-h-screen px-4 py-8 pt-20 md:pt-24" dir={isRTL ? "rtl" : "ltr"}>
       <div className="max-w-2xl mx-auto">
         {/* Header */}
-        <div className="flex items-center justify-between mb-8 fade-up">
+        <div className="flex items-center justify-between mb-6 fade-up">
           <div>
             <h1 className="text-2xl font-semibold text-text-primary" style={{ fontFamily: "Fraunces, serif" }}>
               {t("dashTitle")}
@@ -168,45 +188,30 @@ export default function DashboardPage() {
               {allDone ? t("dashSubtitle_done") : t("dashSubtitle_loading")}
             </p>
           </div>
-
           <div className="flex items-center gap-2">
-            {/* Save button — shown when logged in + all done */}
             {user && supabase && allDone && saveStatus === "idle" && (
-              <button
-                onClick={handleSave}
-                className="text-text-muted hover:text-accent font-body text-xs border border-border hover:border-accent/50 px-3 py-2 rounded-xl transition-all"
-              >
+              <button onClick={handleSave} className="text-text-muted hover:text-accent font-body text-xs border border-border hover:border-accent/50 px-3 py-2 rounded-xl transition-all">
                 {t("saveSession")}
               </button>
             )}
-            {saveStatus === "saving" && (
-              <span className="text-text-muted font-body text-xs px-3 py-2">{t("saving")}</span>
-            )}
-            {saveStatus === "saved" && (
-              <span className="text-accent font-body text-xs px-3 py-2">{t("sessionSaved")}</span>
-            )}
-
-            <button
-              onClick={() => router.push("/")}
-              className="text-text-muted hover:text-text-secondary font-body text-sm border border-border hover:border-accent/40 px-4 py-2 rounded-xl transition-all"
-            >
+            {saveStatus === "saving" && <span className="text-text-muted font-body text-xs px-3 py-2">{t("saving")}</span>}
+            {saveStatus === "saved" && <span className="text-accent font-body text-xs px-3 py-2">{t("sessionSaved")}</span>}
+            <button onClick={() => router.push("/")} className="text-text-muted hover:text-text-secondary font-body text-sm border border-border hover:border-accent/40 px-4 py-2 rounded-xl transition-all">
               {t("newNotes")}
             </button>
           </div>
         </div>
+
+        {/* No API key banner */}
+        {showNoKeyBanner && <NoApiKeyBanner onDismiss={() => setShowNoKeyBanner(false)} />}
 
         {/* Tab Bar */}
         <div className="flex gap-1 bg-surface border border-border rounded-2xl p-1.5 mb-8 fade-up" style={{ animationDelay: "60ms" }}>
           {TAB_LABELS.map(({ id, label, emoji }) => {
             const status = { plan: planState, flashcards: flashcardsState, quiz: quizState }[id].status;
             return (
-              <button
-                key={id}
-                onClick={() => setActiveTab(id)}
-                className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl font-body text-sm transition-all ${
-                  activeTab === id ? "bg-bg text-text-primary shadow" : "text-text-muted hover:text-text-secondary"
-                }`}
-              >
+              <button key={id} onClick={() => setActiveTab(id)}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl font-body text-sm transition-all ${activeTab === id ? "bg-bg text-text-primary shadow" : "text-text-muted hover:text-text-secondary"}`}>
                 <span>{emoji}</span>
                 <span className="hidden sm:inline">{label}</span>
                 {status === "loading" && <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />}
